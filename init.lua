@@ -358,8 +358,12 @@ for key, url in pairs(web_shortcuts) do
 end
 
 -- ============================================================================
--- DESKTOP MANAGEMENT (Multi-Monitor Aware, with Focus Follow)
+-- DESKTOP MANAGEMENT (Event-Driven, with Focus Follow)
 -- ============================================================================
+
+-- This watcher will be used to ensure focus changes *after* a space switch.
+local spaceWatcher = nil
+
 -- Assign desktops to screens. Assumes 1-4 are on primary, 5-9 on secondary.
 local desktopScreenMap = {
     [1] = {screen_index = 1, space_index = 1},
@@ -397,23 +401,34 @@ local function getSpaceForDesktop(desktopNumber)
     return spaceID, targetScreen
 end
 
--- Switch to a desktop and move focus to that monitor
+-- Switch to a desktop and move focus to that monitor using an event-driven watcher
 local function switchToDesktop(desktopNumber)
     local spaceID, targetScreen = getSpaceForDesktop(desktopNumber)
-    if spaceID and targetScreen then
-        hs.spaces.gotoSpace(spaceID)
-        hs.timer.doAfter(0.2, function()
-            local windowsOnTarget = getWindowsOnScreen(targetScreen)
-            if #windowsOnTarget > 0 then
-                windowsOnTarget[1]:focus()
-            else
-                local screenFrame = targetScreen:frame()
-                hs.mouse.setAbsolutePosition({x = screenFrame.x + screenFrame.w / 2, y = screenFrame.y + screenFrame.h / 2})
-            end
-        end)
-    else
+    if not (spaceID and targetScreen) then
         hs.alert.show("Desktop " .. desktopNumber .. " not found")
+        return
     end
+
+    if hs.spaces.focusedSpace() == spaceID then return end
+
+    if spaceWatcher then spaceWatcher:stop() end
+
+    spaceWatcher = hs.spaces.watcher.new(function()
+        -- This callback fires *after* the space has changed.
+        local windowsOnTarget = getWindowsOnScreen(targetScreen)
+        if #windowsOnTarget > 0 then
+            windowsOnTarget[1]:focus()
+        else
+            local screenFrame = targetScreen:frame()
+            hs.mouse.setAbsolutePosition({x = screenFrame.x + screenFrame.w / 2, y = screenFrame.y + screenFrame.h / 2})
+        end
+        -- Stop the watcher so it only runs once.
+        spaceWatcher:stop()
+    end)
+    spaceWatcher:start()
+
+    -- Trigger the space change. The watcher will handle the focus change.
+    hs.spaces.gotoSpace(spaceID)
 end
 
 -- Create desktop switching hotkeys

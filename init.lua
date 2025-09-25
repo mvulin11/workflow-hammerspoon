@@ -9,8 +9,11 @@ hs.hotkey.bind({"cmd", "alt"}, "r", function()
 end)
 
 -- ============================================================================
--- WINDOW NAVIGATION & MANAGEMENT (Geometric Version)
+-- WINDOW NAVIGATION & MANAGEMENT (Enhanced Geometric Tiling)
 -- ============================================================================
+
+-- Forward-declare autoTileCurrentSpace so it can be used by functions defined before it.
+local autoTileCurrentSpace
 
 -- Helper function to get all manageable windows on a given screen
 local function getWindowsOnScreen(screen)
@@ -81,28 +84,33 @@ hs.hotkey.bind({"cmd"}, "up", focus("north"))
 hs.hotkey.bind({"cmd"}, "down", focus("south"))
 
 -- Geometric position swapping
-local function smartSwap(currentWin, direction)
-    local currentFrame = currentWin:frame()
-    local screen = currentWin:screen()
-    local max = screen:frame()
+-- Enhanced geometric position swapping with auto-tiling
+local function smartSwap(direction)
+    return function()
+        local currentWin = hs.window.focusedWindow()
+        if not currentWin then return end
 
-    local windowsOnScreen = getWindowsOnScreen(screen)
-    local candidates = {}
+        local screen = currentWin:screen()
+        local currentFrame = currentWin:frame()
+        local candidates = {}
 
-    for _, win in ipairs(windowsOnScreen) do
-        if win:id() ~= currentWin:id() then
-            local frame = win:frame()
-            local isCandidate = false
-            if direction == "west" and frame.x < currentFrame.x then isCandidate = true
-            elseif direction == "east" and frame.x > currentFrame.x then isCandidate = true
-            elseif direction == "north" and frame.y < currentFrame.y then isCandidate = true
-            elseif direction == "south" and frame.y > currentFrame.y then isCandidate = true
+        -- Find all windows in the given direction
+        for _, win in ipairs(getWindowsOnScreen(screen)) do
+            if win:id() ~= currentWin:id() then
+                local frame = win:frame()
+                local isCandidate = false
+                if direction == "west" and frame.x < currentFrame.x then isCandidate = true
+                elseif direction == "east" and frame.x > currentFrame.x then isCandidate = true
+                elseif direction == "north" and frame.y < currentFrame.y then isCandidate = true
+                elseif direction == "south" and frame.y > currentFrame.y then isCandidate = true
+                end
+                if isCandidate then table.insert(candidates, win) end
             end
-            if isCandidate then table.insert(candidates, win) end
         end
-    end
 
-    if #candidates > 0 then
+        if #candidates == 0 then return end
+
+        -- Find the closest candidate
         local bestCandidate = nil
         local minDistance = math.huge
         for _, win in ipairs(candidates) do
@@ -116,27 +124,26 @@ local function smartSwap(currentWin, direction)
             end
         end
 
+        -- Swap frames with the best candidate and then re-tile the whole space
         if bestCandidate then
             local targetFrame = bestCandidate:frame()
-            bestCandidate:setFrame(currentFrame, 0)
-            currentWin:setFrame(targetFrame, 0)
+            bestCandidate:setFrame(currentFrame)
+            currentWin:setFrame(targetFrame)
+
+            -- Use a timer to ensure the swap is registered before tiling
+            hs.timer.doAfter(0.1, function()
+                autoTileCurrentSpace()
+                currentWin:focus()
+            end)
         end
-    else
-        local newFrame = currentFrame
-        if direction == "left" then newFrame.x = max.x
-        elseif direction == "right" then newFrame.x = max.x + max.w - currentFrame.w
-        elseif direction == "up" then newFrame.y = max.y
-        elseif direction == "down" then newFrame.y = max.y + max.h - currentFrame.h
-        end
-        currentWin:setFrame(newFrame, 0)
     end
 end
 
 -- Tiling shortcuts
-hs.hotkey.bind({"cmd", "shift"}, "left", function() local win = hs.window.focusedWindow() if win then smartSwap(win, "left") end end)
-hs.hotkey.bind({"cmd", "shift"}, "right", function() local win = hs.window.focusedWindow() if win then smartSwap(win, "right") end end)
-hs.hotkey.bind({"cmd", "shift"}, "up", function() local win = hs.window.focusedWindow() if win then smartSwap(win, "up") end end)
-hs.hotkey.bind({"cmd", "shift"}, "down", function() local win = hs.window.focusedWindow() if win then smartSwap(win, "down") end end)
+hs.hotkey.bind({"cmd", "shift"}, "left", smartSwap("west"))
+hs.hotkey.bind({"cmd", "shift"}, "right", smartSwap("east"))
+hs.hotkey.bind({"cmd", "shift"}, "up", smartSwap("north"))
+hs.hotkey.bind({"cmd", "shift"}, "down", smartSwap("south"))
 
 -- ============================================================================
 -- MAIN PANE RESIZING
@@ -191,6 +198,7 @@ local function adjustMainPane(direction)
             })
         end
     end
+    hs.alert.show("Windows Organized")
 end
 
 hs.hotkey.bind({"cmd", "shift"}, "=", function() adjustMainPane("expand") end)
@@ -282,6 +290,10 @@ end)
 -- APPLICATION & WEB SHORTCUTS
 -- ============================================================================
 local apps = {
+    a = "Mail",
+    s = "Notes",
+    c = "FaceTime",
+    i = "Terminal",
     b = "Google Chrome",
     n = "Cursor",
     t = "TradingView",
@@ -299,6 +311,11 @@ for key, appName in pairs(apps) do
         hs.application.launchOrFocus(appName)
     end)
 end
+
+-- Shortcut to open a new iTerm window
+hs.hotkey.bind({"cmd", "shift"}, "return", function()
+    hs.osascript.applescript('tell application "iTerm" to create window with default profile')
+end)
 
 hs.hotkey.bind({"cmd", "alt"}, "t", function() hs.application.launchOrFocus("TextEdit") end)
 
@@ -411,19 +428,27 @@ end
 
 -- Main tiling function, can be called manually or by watchers
 function autoTileCurrentSpace()
-    local screen = hs.mouse.getCurrentScreen()
+    -- Try to get screen from focused window, fall back to mouse's screen.
+    local screen
+    local focusedWin = hs.window.focusedWindow()
+    if focusedWin then
+        screen = focusedWin:screen()
+    else
+        screen = hs.mouse.getCurrentScreen()
+    end
+
+    if not screen then return end
     local frame = screen:frame()
     local currentSpaceID = hs.spaces.focusedSpace()
-    local windowsOnCurrentSpace = {}
 
-    for _, win in ipairs(hs.window.allWindows()) do
-        -- Make sure window is on the current space and is a normal window
-        if hs.fnutils.contains(hs.spaces.windowSpaces(win), currentSpaceID) and not win:isMinimized() and win:title() ~= "" then
-            table.insert(windowsOnCurrentSpace, win)
+    -- Get all manageable windows on the current screen and space
+    local windows = {}
+    for _, win in ipairs(getWindowsOnScreen(screen)) do
+        if hs.fnutils.contains(hs.spaces.windowSpaces(win), currentSpaceID) then
+            table.insert(windows, win)
         end
     end
 
-    local windows = windowsOnCurrentSpace
     local count = #windows
 
     if count == 0 then
@@ -437,13 +462,36 @@ function autoTileCurrentSpace()
         windows[1]:setFrame({x=frame.x, y=frame.y, w=frame.w/2, h=frame.h})
         windows[2]:setFrame({x=frame.x+frame.w/2, y=frame.y, w=frame.w/2, h=frame.h/2})
         windows[3]:setFrame({x=frame.x+frame.w/2, y=frame.y+frame.h/2, w=frame.w/2, h=frame.h/2})
-    elseif count >= 4 then
+    elseif count == 4 then
         windows[1]:setFrame({x=frame.x, y=frame.y, w=frame.w/2, h=frame.h/2})
         windows[2]:setFrame({x=frame.x+frame.w/2, y=frame.y, w=frame.w/2, h=frame.h/2})
         windows[3]:setFrame({x=frame.x, y=frame.y+frame.h/2, w=frame.w/2, h=frame.h/2})
         windows[4]:setFrame({x=frame.x+frame.w/2, y=frame.y+frame.h/2, w=frame.w/2, h=frame.h/2})
+    elseif count == 5 then
+        -- Main on left, 4 in a 2x2 grid on the right
+        windows[1]:setFrame({x=frame.x, y=frame.y, w=frame.w/2, h=frame.h})
+        local right_x = frame.x + frame.w/2
+        local right_w = frame.w/2
+        windows[2]:setFrame({x=right_x, y=frame.y, w=right_w/2, h=frame.h/2})
+        windows[3]:setFrame({x=right_x + right_w/2, y=frame.y, w=right_w/2, h=frame.h/2})
+        windows[4]:setFrame({x=right_x, y=frame.y + frame.h/2, w=right_w/2, h=frame.h/2})
+        windows[5]:setFrame({x=right_x + right_w/2, y=frame.y + frame.h/2, w=right_w/2, h=frame.h/2})
+    elseif count > 5 then
+        -- For more than 5, main on left and stack rest on right
+        windows[1]:setFrame({x=frame.x, y=frame.y, w=frame.w/2, h=frame.h})
+        local right_x = frame.x + frame.w/2
+        local right_w = frame.w/2
+        local num_right_windows = count - 1
+        local right_h = frame.h / num_right_windows
+        for i = 2, count do
+            windows[i]:setFrame({
+                x = right_x,
+                y = frame.y + (right_h * (i - 2)),
+                w = right_w,
+                h = right_h
+            })
+        end
     end
-    hs.alert.show("Windows Organized")
 end
 
 -- Bind the manual tiling shortcut
@@ -476,33 +524,38 @@ end)
 hs.hotkey.bind({"cmd"}, "h", function()
     local shortcuts = [[
     🖥️  WINDOW MANAGEMENT:
-    Cmd + ←/→/↑/↓     Navigate windows
-    Cmd + Shift + ←/→/↑/↓ Swap window positions
-    Cmd + Shift + R     Auto-organize all windows
-    Cmd + Shift + =     Expand main window
-    Cmd + Shift + -     Shrink main window
+    Cmd + ←/→/↑/↓     Focus on adjacent window
+    Cmd + Shift + ←/→/↑/↓ Swap window & auto-tile space
+    Cmd + Shift + R     Re-tile all windows in space
     Cmd + W             Close window
     Cmd + Shift + S     Minimize window
     Cmd + Shift + U     Restore minimized window
     Cmd + F11           Toggle fullscreen
+    Cmd + Shift + =     Expand main pane
+    Cmd + Shift + -     Shrink main pane
 
     🚀 DESKTOPS:
     Cmd + 1-9           Switch to desktop
     Cmd + Alt + ↓     Jump to MacBook (Universal Control)
 
     📱 APPLICATIONS:
-    Cmd + Return        iTerm
+    Cmd + Return        iTerm (focus)
+    Cmd + Shift + Return  iTerm (new window)
+    Cmd + A             Mail
     Cmd + B             Chrome (focus)
     Cmd + Shift + B     Chrome (new window)
+    Cmd + C             FaceTime
+    Cmd + D             Docker
+    Cmd + F             Finder
+    Cmd + G             Messages
+    Cmd + I             Terminal
+    Cmd + M             Spotify
     Cmd + N             Cursor
+    Cmd + O             Notion
+    Cmd + S             Notes
     Cmd + T             TradingView
     Cmd + Alt + T       TextEdit
-    Cmd + M             Spotify
-    Cmd + D             Docker
-    Cmd + O             Notion
-    Cmd + G             Messages
     Cmd + ,             System Settings
-    Cmd + F             Finder
 
     🌐 WEB:
     Cmd + Y             YouTube
